@@ -1,298 +1,317 @@
-jsfeat.yape06.laplacian_threshold = 30 | 0;
-jsfeat.yape06.min_eigen_value_threshold = 25 | 0;
+/*
+ * Copyright 2017 Google Inc. All Rights Reserved.
+ * Licensed under the Apache License, Version 2.0 (the 'License');
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an 'AS IS' BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
-async function getImageU8(url) {
-  const img = new Image();
-  img.src = url;
+const MODEL_OBJ_URL = "/assets/ArcticFox_Posed.obj";
+const MODEL_MTL_URL = "/assets/ArcticFox_Posed.mtl";
+const MODEL_SCALE = 0.1;
 
-  await new Promise(resolve => {
-    img.onload = resolve;
-  });
+/**
+ * Container class to manage connecting to the WebXR Device API
+ * and handle rendering on every frame.
+ */
+class App {
+  constructor() {
+    this.onXRFrame = this.onXRFrame.bind(this);
+    this.onEnterAR = this.onEnterAR.bind(this);
+    this.onClick = this.onClick.bind(this);
 
-  const { naturalWidth: width, naturalHeight: height } = img;
+    this.init();
+  }
 
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0);
-  ctx.scale(600 / width, 800 / height);
-  ctx.drawImage(ctx.canvas, 0, 0);
+  /**
+   * Fetches the XRDevice, if available.
+   */
+  async init() {
+    // The entry point of the WebXR Device API is on `navigator.xr`.
+    // We also want to ensure that `XRSession` has `requestHitTest`,
+    // indicating that the #webxr-hit-test flag is enabled.
+    if (navigator.xr && XRSession.prototype.requestHitTest) {
+      try {
+        this.device = await navigator.xr.requestDevice();
+      } catch (e) {
+        // If there are no valid XRDevice's on the system,
+        // `requestDevice()` rejects the promise. Catch our
+        // awaited promise and display message indicating there
+        // are no valid devices.
+        this.onNoXRDevice();
+        return;
+      }
+    } else {
+      // If `navigator.xr` or `XRSession.prototype.requestHitTest`
+      // does not exist, we must display a message indicating there
+      // are no valid devices.
+      this.onNoXRDevice();
+      return;
+    }
 
-  console.log(ctx.getImageData(0, 0, 600, 800));
-  return ctx.getImageData(0, 0, 600, 800);
-}
+    // We found an XRDevice! Bind a click listener on our "Enter AR" button
+    // since the spec requires calling `device.requestSession()` within a
+    // user gesture.
+    document.addEventListener("click", this.onEnterAR);
+  }
 
-const cvs1 = document.getElementById("cvs1");
-const cvs2 = document.getElementById("cvs2");
+  /**
+   * Handle a click event on the '#enter-ar' button and attempt to
+   * start an XRSession.
+   */
+  async onEnterAR() {
+    document.removeEventListener("click", this.onEnterAR);
 
-Promise.all([getImageU8("/img/3.jpg"), getImageU8("/img/4.jpg")]).then(
-  ([leftSource, rightSource]) => {
-    const [leftCorners, leftDescriptors] = findCorners(leftSource);
-    const [rightCorners, rightDescriptors] = findCorners(rightSource);
+    // Now that we have an XRDevice, and are responding to a user
+    // gesture, we must create an XRPresentationContext on a
+    // canvas element.
+    const outputCanvas = document.createElement("canvas");
+    outputCanvas.width = window.innerWidth;
+    outputCanvas.height = window.innerHeight;
+    const ctx = outputCanvas.getContext("xrpresent");
 
-    const matches = match_pattern(leftDescriptors, rightDescriptors).slice(
-      0,
-      6
+    try {
+      // Request a session for the XRDevice with the XRPresentationContext
+      // we just created.
+      // Note that `device.requestSession()` must be called in response to
+      // a user gesture, hence this function being a click handler.
+      const session = await this.device.requestSession({
+        outputContext: ctx,
+        environmentIntegration: true
+      });
+
+      // If `requestSession` is successful, add the canvas to the
+      // DOM since we know it will now be used.
+      document.body.appendChild(outputCanvas);
+      this.onSessionStarted(session);
+    } catch (e) {
+      // If `requestSession` fails, the canvas is not added, and we
+      // call our function for unsupported browsers.
+      this.onNoXRDevice();
+    }
+  }
+
+  /**
+   * Toggle on a class on the page to disable the "Enter AR"
+   * button and display the unsupported browser message.
+   */
+  onNoXRDevice() {
+    document.body.classList.add("unsupported");
+  }
+
+  /**
+   * Called when the XRSession has begun. Here we set up our three.js
+   * renderer, scene, and camera and attach our XRWebGLLayer to the
+   * XRSession and kick off the render loop.
+   */
+  async onSessionStarted(session) {
+    this.session = session;
+
+    // Add the `ar` class to our body, which will hide our 2D components
+    document.body.classList.add("ar");
+
+    // To help with working with 3D on the web, we'll use three.js. Set up
+    // the WebGLRenderer, which handles rendering to our session's base layer.
+    this.renderer = new THREE.WebGLRenderer({
+      alpha: true,
+      preserveDrawingBuffer: true
+    });
+    this.renderer.autoClear = false;
+
+    // We must tell the renderer that it needs to render shadows.
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    this.gl = this.renderer.getContext();
+
+    // Ensure that the context we want to write to is compatible
+    // with our XRDevice
+    await this.gl.setCompatibleXRDevice(this.session.device);
+
+    // Set our session's baseLayer to an XRWebGLLayer
+    // using our new renderer's context
+    this.session.baseLayer = new XRWebGLLayer(this.session, this.gl);
+
+    // A THREE.Scene contains the scene graph for all objects in the
+    // render scene. Call our utility which gives us a THREE.Scene
+    // with a few lights and surface to render our shadows. Lights need
+    // to be configured in order to use shadows, see `shared/utils.js`
+    // for more information.
+    this.scene = DemoUtils.createLitScene();
+
+    // Fixes an issue with three.js switching framebuffer back to 0
+    // after using a render target, fixes an issue with shadows.
+    DemoUtils.fixFramebuffer(this);
+
+    // Use the DemoUtils.loadModel to load our OBJ and MTL. The promise
+    // resolves to a THREE.Group containing our mesh information.
+    // Dont await this promise, as we want to start the rendering
+    // process before this finishes.
+    DemoUtils.loadModel(MODEL_OBJ_URL, MODEL_MTL_URL).then(model => {
+      this.model = model;
+
+      // Some models contain multiple meshes, so we want to make sure
+      // all of our meshes within the model case a shadow.
+      this.model.children.forEach(mesh => (mesh.castShadow = true));
+
+      // Every model is different -- you may have to adjust the scale
+      // of a model depending on the use.
+      this.model.scale.set(MODEL_SCALE, MODEL_SCALE, MODEL_SCALE);
+    });
+
+    // We'll update the camera matrices directly from API, so
+    // disable matrix auto updates so three.js doesn't attempt
+    // to handle the matrices independently.
+    this.camera = new THREE.PerspectiveCamera();
+    this.camera.matrixAutoUpdate = false;
+
+    // Add a Reticle object, which will help us find surfaces by drawing
+    // a ring shape onto found surfaces. See source code
+    // of Reticle in shared/utils.js for more details.
+    this.reticle = new Reticle(this.session, this.camera);
+    this.scene.add(this.reticle);
+
+    this.frameOfRef = await this.session.requestFrameOfReference("eye-level");
+    this.session.requestAnimationFrame(this.onXRFrame);
+
+    window.addEventListener("click", this.onClick);
+  }
+
+  /**
+   * Called on the XRSession's requestAnimationFrame.
+   * Called with the time and XRPresentationFrame.
+   */
+  onXRFrame(time, frame) {
+    let session = frame.session;
+    let pose = frame.getDevicePose(this.frameOfRef);
+
+    // Update the reticle's position
+    this.reticle.update(this.frameOfRef);
+
+    // If the reticle has found a hit (is visible) and we have
+    // not yet marked our app as stabilized, do so
+    if (this.reticle.visible && !this.stabilized) {
+      this.stabilized = true;
+      document.body.classList.add("stabilized");
+    }
+
+    // Queue up the next frame
+    session.requestAnimationFrame(this.onXRFrame);
+
+    // Bind the framebuffer to our baseLayer's framebuffer
+    this.gl.bindFramebuffer(
+      this.gl.FRAMEBUFFER,
+      this.session.baseLayer.framebuffer
     );
 
-    const from = matches.map(match => leftCorners[match.screen_idx]);
-    const to = matches.map(match => rightCorners[match.pattern_idx]);
+    if (pose) {
+      // Our XRFrame has an array of views. In the VR case, we'll have
+      // two views, one for each eye. In mobile AR, however, we only
+      // have one view.
+      for (let view of frame.views) {
+        const viewport = session.baseLayer.getViewport(view);
+        this.renderer.setSize(viewport.width, viewport.height);
 
-    const ctx1 = cvs1.getContext("2d");
-    ctx1.putImageData(leftSource, 0, 0);
-    from.forEach((point, i) => {
-      ctx1.fillStyle = [
-        "#ff00ff",
-        "#ffff00",
-        "#00ffff",
-        "#ff0000",
-        "#00ff00",
-        "#0000ff"
-      ][i % 6]; // Red color
-      ctx1.beginPath(); //Start path
-      ctx1.arc(point.x, point.y, 4, 0, Math.PI * 2, true);
-      ctx1.fill();
-    });
+        // Set the view matrix and projection matrix from XRDevicePose
+        // and XRView onto our THREE.Camera.
+        this.camera.projectionMatrix.fromArray(view.projectionMatrix);
+        const viewMatrix = new THREE.Matrix4().fromArray(
+          pose.getViewMatrix(view)
+        );
+        this.camera.matrix.getInverse(viewMatrix);
+        this.camera.updateMatrixWorld(true);
 
-    const ctx2 = cvs2.getContext("2d");
-    ctx2.putImageData(rightSource, 0, 0);
-    to.forEach((point, i) => {
-      ctx2.fillStyle = [
-        "#ff00ff",
-        "#ffff00",
-        "#00ffff",
-        "#ff0000",
-        "#00ff00",
-        "#0000ff"
-      ][i % 6]; // Red color
-      ctx2.beginPath(); //Start path
-      ctx2.arc(point.x, point.y, 4, 0, Math.PI * 2, true);
-      ctx2.fill();
-    });
+        // this.renderer.clearDepth();
 
-    // homograph
-    const homo3x3 = findHomography(from, to, matches.length);
-    const mat3d = [
-      ...homo3x3.data.slice(0, 3),
-      0,
-      ...homo3x3.data.slice(3, 6),
-      0,
-      ...homo3x3.data.slice(6, 9),
-      0,
-      0,
-      0,
-      0,
-      1
-    ].join(",");
-
-    cvs2.style.transform = `matrix3d(${mat3d})`;
-  }
-);
-
-function findCorners(imgData) {
-  const img = new jsfeat.matrix_t(
-    imgData.width,
-    imgData.height,
-    jsfeat.U8_t | jsfeat.C1_t,
-    imgData.buffer
-  );
-
-  jsfeat.imgproc.grayscale(
-    imgData.data,
-    imgData.width,
-    imgData.height,
-    img,
-    jsfeat.COLOR_RGBA2GRAY
-  );
-
-  jsfeat.imgproc.gaussian_blur(img, img, 10 | 0);
-
-  const corners = [];
-  const descriptors = new jsfeat.matrix_t(32, 500, jsfeat.U8_t | jsfeat.C1_t);
-
-  let i = 640 * 480;
-  while (--i >= 0) {
-    corners[i] = new jsfeat.keypoint_t(0, 0, 0, 0, -1);
-  }
-
-  num_corners = detect_keypoints(img, corners, 500);
-
-  jsfeat.orb.describe(img, corners, num_corners, descriptors);
-
-  return [corners, descriptors];
-}
-
-function findHomography(from, to, count) {
-  const homo_kernel = new jsfeat.motion_model.homography2d();
-  const homo_transform = new jsfeat.matrix_t(3, 3, jsfeat.F32_t | jsfeat.C1_t);
-
-  homo_kernel.run(from, to, homo_transform, count);
-
-  return homo_transform;
-}
-
-var match_t = (function() {
-  function match_t(screen_idx, pattern_lev, pattern_idx, distance) {
-    if (typeof screen_idx === "undefined") {
-      screen_idx = 0;
-    }
-    if (typeof pattern_lev === "undefined") {
-      pattern_lev = 0;
-    }
-    if (typeof pattern_idx === "undefined") {
-      pattern_idx = 0;
-    }
-    if (typeof distance === "undefined") {
-      distance = 0;
-    }
-
-    this.screen_idx = screen_idx;
-    this.pattern_lev = pattern_lev;
-    this.pattern_idx = pattern_idx;
-    this.distance = distance;
-  }
-  return match_t;
-})();
-
-function detect_keypoints(img, corners, max_allowed) {
-  // detect features
-  var count = jsfeat.yape06.detect(img, corners, 17);
-
-  // sort by score and reduce the count if needed
-  if (count > max_allowed) {
-    jsfeat.math.qsort(corners, 0, count - 1, function(a, b) {
-      return b.score < a.score;
-    });
-    count = max_allowed;
-  }
-
-  // calculate dominant orientation for each keypoint
-  for (var i = 0; i < count; ++i) {
-    corners[i].angle = ic_angle(img, corners[i].x, corners[i].y);
-  }
-
-  return count;
-}
-
-const u_max = new Int32Array([
-  15,
-  15,
-  15,
-  15,
-  14,
-  14,
-  14,
-  13,
-  13,
-  12,
-  11,
-  10,
-  9,
-  8,
-  6,
-  3,
-  0
-]);
-
-function ic_angle(img, px, py) {
-  var half_k = 15; // half patch size
-  var m_01 = 0,
-    m_10 = 0;
-  var src = img.data,
-    step = img.cols;
-  var u = 0,
-    v = 0,
-    center_off = (py * step + px) | 0;
-  var v_sum = 0,
-    d = 0,
-    val_plus = 0,
-    val_minus = 0;
-
-  // Treat the center line differently, v=0
-  for (u = -half_k; u <= half_k; ++u) m_10 += u * src[center_off + u];
-
-  // Go line by line in the circular patch
-  for (v = 1; v <= half_k; ++v) {
-    // Proceed over the two lines
-    v_sum = 0;
-    d = u_max[v];
-    for (u = -d; u <= d; ++u) {
-      val_plus = src[center_off + u + v * step];
-      val_minus = src[center_off + u - v * step];
-      v_sum += val_plus - val_minus;
-      m_10 += u * (val_plus + val_minus);
-    }
-    m_01 += v * v_sum;
-  }
-
-  return Math.atan2(m_01, m_10);
-}
-
-// non zero bits count
-function popcnt32(n) {
-  n -= (n >> 1) & 0x55555555;
-  n = (n & 0x33333333) + ((n >> 2) & 0x33333333);
-  return (((n + (n >> 4)) & 0xf0f0f0f) * 0x1010101) >> 24;
-}
-
-// naive brute-force matching.
-// each on screen point is compared to all pattern points
-// to find the closest match
-function match_pattern(descriptorsLeft, descriptorsRight) {
-  const matches = [];
-  let i = 640 * 480;
-  while (--i >= 0) {
-    matches[i] = new match_t();
-  }
-
-  var q_cnt = descriptorsLeft.rows;
-  var query_u32 = descriptorsLeft.buffer.i32; // cast to integer buffer
-  var qd_off = 0;
-  var qidx = 0,
-    lev = 0,
-    pidx = 0,
-    k = 0;
-  var num_matches = 0;
-
-  for (qidx = 0; qidx < q_cnt; ++qidx) {
-    var best_dist = 256;
-    var best_dist2 = 256;
-    var best_idx = -1;
-    var best_lev = -1;
-
-    var lev_descr = descriptorsRight;
-    var ld_cnt = lev_descr.rows;
-    var ld_i32 = lev_descr.buffer.i32; // cast to integer buffer
-    var ld_off = 0;
-
-    for (pidx = 0; pidx < ld_cnt; ++pidx) {
-      var curr_d = 0;
-      // our descriptor is 32 bytes so we have 8 Integers
-      for (k = 0; k < 8; ++k) {
-        curr_d += popcnt32(query_u32[qd_off + k] ^ ld_i32[ld_off + k]);
+        // Render our scene with our THREE.WebGLRenderer
+        this.renderer.render(this.scene, this.camera);
       }
-
-      if (curr_d < best_dist) {
-        best_dist2 = best_dist;
-        best_dist = curr_d;
-        best_lev = lev;
-        best_idx = pidx;
-      } else if (curr_d < best_dist2) {
-        best_dist2 = curr_d;
-      }
-
-      ld_off += 8; // next descriptor
     }
-
-    // filter out by some threshold
-    if (best_dist < 48) {
-      matches[num_matches].screen_idx = qidx;
-      matches[num_matches].pattern_lev = best_lev;
-      matches[num_matches].pattern_idx = best_idx;
-      num_matches++;
-    }
-
-    qd_off += 8; // next query descriptor
   }
 
-  return matches.slice(0, num_matches);
+  /**
+   * This method is called when tapping on the page once an XRSession
+   * has started. We're going to be firing a ray from the center of
+   * the screen, and if a hit is found, use it to place our object
+   * at the point of collision.
+   */
+  async onClick(e) {
+    console.log("click");
+    // If our model is not yet loaded, abort
+    if (!this.model) {
+      console.log("no model loaded");
+      return;
+    }
+
+    // We're going to be firing a ray from the center of the screen.
+    // The requestHitTest function takes an x and y coordinate in
+    // Normalized Device Coordinates, where the upper left is (-1, 1)
+    // and the bottom right is (1, -1). This makes (0, 0) our center.
+    const x = 0;
+    const y = 0;
+
+    // Create a THREE.Raycaster if one doesn't already exist,
+    // and use it to generate an origin and direction from
+    // our camera (device) using the tap coordinates.
+    // Learn more about THREE.Raycaster:
+    // https://threejs.org/docs/#api/core/Raycaster
+    this.raycaster = this.raycaster || new THREE.Raycaster();
+    this.raycaster.setFromCamera({ x, y }, this.camera);
+    const ray = this.raycaster.ray;
+
+    // Fire the hit test to see if our ray collides with a real
+    // surface. Note that we must turn our THREE.Vector3 origin and
+    // direction into an array of x, y, and z values. The proposal
+    // for `XRSession.prototype.requestHitTest` can be found here:
+    // https://github.com/immersive-web/hit-test
+    const origin = new Float32Array(ray.origin.toArray());
+    const direction = new Float32Array(ray.direction.toArray());
+    const hits = await this.session.requestHitTest(
+      origin,
+      direction,
+      this.frameOfRef
+    );
+
+    // If we found at least one hit...
+    if (hits.length) {
+      // We can have multiple collisions per hit test. Let's just take the
+      // first hit, the nearest, for now.
+      const hit = hits[0];
+
+      // Our XRHitResult object has one property, `hitMatrix`, a
+      // Float32Array(16) representing a 4x4 Matrix encoding position where
+      // the ray hit an object, and the orientation has a Y-axis that corresponds
+      // with the normal of the object at that location.
+      // Turn this matrix into a THREE.Matrix4().
+      const hitMatrix = new THREE.Matrix4().fromArray(hit.hitMatrix);
+
+      // Now apply the position from the hitMatrix onto our model.
+      this.model.position.setFromMatrixPosition(hitMatrix);
+
+      // Rather than using the rotation encoded by the `modelMatrix`,
+      // rotate the model to face the camera. Use this utility to
+      // rotate the model only on the Y axis.
+      DemoUtils.lookAtOnY(this.model, this.camera);
+
+      // Now that we've found a collision from the hit test, let's use
+      // the Y position of that hit and assume that's the floor. We created
+      // a mesh in `DemoUtils.createLitScene()` that receives shadows, so set
+      // it's Y position to that of the hit matrix so that shadows appear to be
+      // cast on the ground under the model.
+      const shadowMesh = this.scene.children.find(c => c.name === "shadowMesh");
+      shadowMesh.position.y = this.model.position.y;
+
+      // Ensure our model has been added to the scene.
+      this.scene.add(this.model);
+    }
+  }
 }
+
+window.app = new App();
