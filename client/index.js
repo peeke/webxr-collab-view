@@ -154,16 +154,18 @@ class App {
     // resolves to a THREE.Group containing our mesh information.
     // Dont await this promise, as we want to start the rendering
     // process before this finishes.
-    DemoUtils.loadModel(MODEL_OBJ_URL, MODEL_MTL_URL).then(model => {
-      this.model = model;
+    const loader = new THREE.PLYLoader();
 
-      // Some models contain multiple meshes, so we want to make sure
-      // all of our meshes within the model case a shadow.
-      this.model.children.forEach(mesh => (mesh.castShadow = true));
-
-      // Every model is different -- you may have to adjust the scale
-      // of a model depending on the use.
-      this.model.scale.set(MODEL_SCALE, MODEL_SCALE, MODEL_SCALE);
+    loader.load("/assets/dennis/deniax.ply", bufferGeometry => {
+      const geometry = new THREE.Geometry().fromBufferGeometry(bufferGeometry);
+      const material = new THREE.MeshPhongMaterial({
+        specular: 0x111111,
+        shininess: 0,
+        vertexColors: THREE.VertexColors
+      });
+      this.model = new THREE.Mesh(geometry, material);
+      this.model.scale.set(MODEL_SCALE / 5, MODEL_SCALE / 5, MODEL_SCALE / 5);
+      this.scene.add(this.model);
     });
 
     // We'll update the camera matrices directly from API, so
@@ -309,6 +311,7 @@ class App {
       shadowMesh.position.y = this.model.position.y;
 
       // Ensure our model has been added to the scene.
+      this.model.rotation.x = THREE.Math.degToRad(-90);
       this.scene.add(this.model);
     }
   }
