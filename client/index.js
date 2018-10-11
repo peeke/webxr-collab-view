@@ -1,26 +1,7 @@
-/*
- * Copyright 2017 Google Inc. All Rights Reserved.
- * Licensed under the Apache License, Version 2.0 (the 'License');
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an 'AS IS' BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 const MODEL_OBJ_URL = "/assets/ArcticFox_Posed.obj";
 const MODEL_MTL_URL = "/assets/ArcticFox_Posed.mtl";
-const MODEL_SCALE = 0.1;
+const MODEL_SCALE = 0.02;
 
-/**
- * Container class to manage connecting to the WebXR Device API
- * and handle rendering on every frame.
- */
 class App {
   constructor() {
     this.onXRFrame = this.onXRFrame.bind(this);
@@ -30,153 +11,185 @@ class App {
     this.init();
   }
 
-  /**
-   * Fetches the XRDevice, if available.
-   */
   async init() {
-    // The entry point of the WebXR Device API is on `navigator.xr`.
-    // We also want to ensure that `XRSession` has `requestHitTest`,
-    // indicating that the #webxr-hit-test flag is enabled.
-    if (navigator.xr && XRSession.prototype.requestHitTest) {
-      try {
-        this.device = await navigator.xr.requestDevice();
-      } catch (e) {
-        // If there are no valid XRDevice's on the system,
-        // `requestDevice()` rejects the promise. Catch our
-        // awaited promise and display message indicating there
-        // are no valid devices.
-        this.onNoXRDevice();
-        return;
-      }
-    } else {
-      // If `navigator.xr` or `XRSession.prototype.requestHitTest`
-      // does not exist, we must display a message indicating there
-      // are no valid devices.
+    if (!navigator.xr || !XRSession.prototype.requestHitTest) {
       this.onNoXRDevice();
       return;
     }
 
-    // We found an XRDevice! Bind a click listener on our "Enter AR" button
-    // since the spec requires calling `device.requestSession()` within a
-    // user gesture.
-    document.addEventListener("click", this.onEnterAR);
+    try {
+      this.device = await navigator.xr.requestDevice();
+      document.addEventListener("click", this.onEnterAR);
+    } catch (e) {
+      this.onNoXRDevice();
+    }
   }
 
-  /**
-   * Handle a click event on the '#enter-ar' button and attempt to
-   * start an XRSession.
-   */
   async onEnterAR() {
     document.removeEventListener("click", this.onEnterAR);
 
-    // Now that we have an XRDevice, and are responding to a user
-    // gesture, we must create an XRPresentationContext on a
-    // canvas element.
     const outputCanvas = document.createElement("canvas");
     outputCanvas.width = window.innerWidth;
     outputCanvas.height = window.innerHeight;
     const ctx = outputCanvas.getContext("xrpresent");
 
     try {
-      // Request a session for the XRDevice with the XRPresentationContext
-      // we just created.
-      // Note that `device.requestSession()` must be called in response to
-      // a user gesture, hence this function being a click handler.
       const session = await this.device.requestSession({
         outputContext: ctx,
         environmentIntegration: true
       });
 
-      // If `requestSession` is successful, add the canvas to the
-      // DOM since we know it will now be used.
       document.body.appendChild(outputCanvas);
       this.onSessionStarted(session);
     } catch (e) {
-      // If `requestSession` fails, the canvas is not added, and we
-      // call our function for unsupported browsers.
       this.onNoXRDevice();
     }
   }
 
-  /**
-   * Toggle on a class on the page to disable the "Enter AR"
-   * button and display the unsupported browser message.
-   */
-  onNoXRDevice() {
-    document.body.classList.add("unsupported");
+  setupRenderer(xr) {
+    const options = xr
+      ? {
+          alpha: true,
+          preserveDrawingBuffer: true,
+          autoClear: false
+        }
+      : {
+          alpha: true
+        };
+
+    const renderer = new THREE.WebGLRenderer(options);
+
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    return renderer;
   }
 
-  /**
-   * Called when the XRSession has begun. Here we set up our three.js
-   * renderer, scene, and camera and attach our XRWebGLLayer to the
-   * XRSession and kick off the render loop.
-   */
+  setupComposer(renderer, scene, camera) {
+    const composer = new THREE.EffectComposer(renderer);
+
+    const renderPass = new THREE.RenderPass(scene, camera);
+    composer.addPass(renderPass);
+
+    const ssaoPass = new THREE.SSAOPass(scene, camera, false, true);
+    // ssaoPass.renderToScreen = true;
+    composer.addPass(ssaoPass);
+
+    // ssaoPass.onlyAO = true;
+    ssaoPass.radius = 64;
+    ssaoPass.aoClamp = 1;
+    ssaoPass.lumInfluence = 1;
+
+    const saoPass = new THREE.SAOPass(scene, camera, false, true);
+    saoPass.renderToScreen = true;
+    composer.addPass(saoPass);
+
+    saoPass.params = {
+      output: THREE.SAOPass.OUTPUT.Default,
+      saoBias: 1,
+      saoIntensity: 0.00015,
+      saoScale: 1,
+      saoKernelRadius: 32,
+      saoMinResolution: 0,
+      saoBlur: true,
+      saoBlurRadius: 20,
+      saoBlurDepthCutoff: 0.0025,
+      saoBlurStdDev: 12
+    };
+
+    return composer;
+  }
+
+  loadModel() {
+    return new Promise(resolve => {
+      const loader = new THREE.PLYLoader();
+      loader.load("/assets/dennis/deniax.ply", bufferGeometry => {
+        const geometry = new THREE.Geometry().fromBufferGeometry(
+          bufferGeometry
+        );
+        const material = new THREE.MeshPhongMaterial({
+          specular: 0x111111,
+          shininess: 0,
+          vertexColors: THREE.VertexColors
+        });
+
+        const model = new THREE.Mesh(geometry, material);
+        model.scale.set(MODEL_SCALE, MODEL_SCALE, MODEL_SCALE);
+        model.rotation.x = THREE.Math.degToRad(-90);
+        model.castShadow = true;
+        model.receiveShadow = true;
+
+        resolve(model);
+      });
+    });
+  }
+
+  onNoXRDevice() {
+    document.body.classList.add("unsupported");
+
+    this.renderer = this.setupRenderer(false);
+    this.scene = setupScene();
+
+    this.camera = new THREE.PerspectiveCamera(
+      50,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      2000
+    );
+
+    this.composer = this.setupComposer(this.renderer, this.scene, this.camera);
+
+    this.camera.position.set(-1, 1, 1);
+    console.log(this.camera.rotation);
+
+    const controls = new THREE.OrbitControls(this.camera);
+    controls.target.set(0, 0, 0);
+    controls.update();
+
+    document.body.appendChild(this.renderer.domElement);
+    this.renderer.domElement.width = window.innerWidth;
+    this.renderer.domElement.height = window.innerHeight;
+    this.resize({ width: window.innerWidth, height: window.innerHeight });
+
+    this.loadModel().then(model => {
+      this.model = model;
+      this.scene.add(model);
+      this.camera.lookAt(this.model.position);
+    });
+
+    const render = () => {
+      this.render();
+      requestAnimationFrame(render);
+    };
+
+    render();
+  }
+
   async onSessionStarted(session) {
     this.session = session;
-
-    // Add the `ar` class to our body, which will hide our 2D components
     document.body.classList.add("ar");
 
-    // To help with working with 3D on the web, we'll use three.js. Set up
-    // the WebGLRenderer, which handles rendering to our session's base layer.
-    this.renderer = new THREE.WebGLRenderer({
-      alpha: true,
-      preserveDrawingBuffer: true
-    });
-    this.renderer.autoClear = false;
-
-    // We must tell the renderer that it needs to render shadows.
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-    this.gl = this.renderer.getContext();
-
-    // Ensure that the context we want to write to is compatible
-    // with our XRDevice
-    await this.gl.setCompatibleXRDevice(this.session.device);
-
-    // Set our session's baseLayer to an XRWebGLLayer
-    // using our new renderer's context
-    this.session.baseLayer = new XRWebGLLayer(this.session, this.gl);
-
-    // A THREE.Scene contains the scene graph for all objects in the
-    // render scene. Call our utility which gives us a THREE.Scene
-    // with a few lights and surface to render our shadows. Lights need
-    // to be configured in order to use shadows, see `shared/utils.js`
-    // for more information.
-    this.scene = DemoUtils.createLitScene();
-
-    // Fixes an issue with three.js switching framebuffer back to 0
-    // after using a render target, fixes an issue with shadows.
-    DemoUtils.fixFramebuffer(this);
-
-    // Use the DemoUtils.loadModel to load our OBJ and MTL. The promise
-    // resolves to a THREE.Group containing our mesh information.
-    // Dont await this promise, as we want to start the rendering
-    // process before this finishes.
-    const loader = new THREE.PLYLoader();
-
-    loader.load("/assets/dennis/deniax.ply", bufferGeometry => {
-      const geometry = new THREE.Geometry().fromBufferGeometry(bufferGeometry);
-      const material = new THREE.MeshPhongMaterial({
-        specular: 0x111111,
-        shininess: 0,
-        vertexColors: THREE.VertexColors
-      });
-      this.model = new THREE.Mesh(geometry, material);
-      this.model.scale.set(MODEL_SCALE / 5, MODEL_SCALE / 5, MODEL_SCALE / 5);
-      this.scene.add(this.model);
-    });
-
-    // We'll update the camera matrices directly from API, so
-    // disable matrix auto updates so three.js doesn't attempt
-    // to handle the matrices independently.
+    this.renderer = this.setupRenderer(true);
+    this.scene = setupScene();
     this.camera = new THREE.PerspectiveCamera();
     this.camera.matrixAutoUpdate = false;
 
-    // Add a Reticle object, which will help us find surfaces by drawing
-    // a ring shape onto found surfaces. See source code
-    // of Reticle in shared/utils.js for more details.
+    this.loadModel().then(model => {
+      this.model = model;
+      this.model.visible = false;
+      this.scene.add(model);
+    });
+
+    this.composer = this.setupComposer(this.renderer, this.scene, this.camera);
+
+    this.gl = this.renderer.getContext();
+
+    await this.gl.setCompatibleXRDevice(this.session.device);
+
+    this.session.baseLayer = new XRWebGLLayer(this.session, this.gl);
+
+    fixFramebuffer(this);
+
     this.reticle = new Reticle(this.session, this.camera);
     this.scene.add(this.reticle);
 
@@ -186,43 +199,31 @@ class App {
     window.addEventListener("click", this.onClick);
   }
 
-  /**
-   * Called on the XRSession's requestAnimationFrame.
-   * Called with the time and XRPresentationFrame.
-   */
   onXRFrame(time, frame) {
     let session = frame.session;
     let pose = frame.getDevicePose(this.frameOfRef);
 
-    // Update the reticle's position
     this.reticle.update(this.frameOfRef);
 
-    // If the reticle has found a hit (is visible) and we have
-    // not yet marked our app as stabilized, do so
     if (this.reticle.visible && !this.stabilized) {
       this.stabilized = true;
+      console.log("stabilized");
       document.body.classList.add("stabilized");
     }
 
-    // Queue up the next frame
     session.requestAnimationFrame(this.onXRFrame);
 
-    // Bind the framebuffer to our baseLayer's framebuffer
     this.gl.bindFramebuffer(
       this.gl.FRAMEBUFFER,
       this.session.baseLayer.framebuffer
     );
 
     if (pose) {
-      // Our XRFrame has an array of views. In the VR case, we'll have
-      // two views, one for each eye. In mobile AR, however, we only
-      // have one view.
       for (let view of frame.views) {
         const viewport = session.baseLayer.getViewport(view);
-        this.renderer.setSize(viewport.width, viewport.height);
 
-        // Set the view matrix and projection matrix from XRDevicePose
-        // and XRView onto our THREE.Camera.
+        this.resize(viewport);
+
         this.camera.projectionMatrix.fromArray(view.projectionMatrix);
         const viewMatrix = new THREE.Matrix4().fromArray(
           pose.getViewMatrix(view)
@@ -232,45 +233,32 @@ class App {
 
         // this.renderer.clearDepth();
 
-        // Render our scene with our THREE.WebGLRenderer
-        this.renderer.render(this.scene, this.camera);
+        this.render();
       }
     }
   }
 
-  /**
-   * This method is called when tapping on the page once an XRSession
-   * has started. We're going to be firing a ray from the center of
-   * the screen, and if a hit is found, use it to place our object
-   * at the point of collision.
-   */
+  resize(viewport) {
+    this.renderer.setSize(viewport.width, viewport.height);
+    this.composer && this.composer.setSize(viewport.width, viewport.height);
+  }
+
+  render() {
+    this.composer
+      ? this.composer.render()
+      : this.renderer.render(this.scene, this.camera);
+  }
+
   async onClick(e) {
-    console.log("click");
-    // If our model is not yet loaded, abort
     if (!this.model) {
       console.log("no model loaded");
       return;
     }
 
-    // We're going to be firing a ray from the center of the screen.
-    // The requestHitTest function takes an x and y coordinate in
-    // Normalized Device Coordinates, where the upper left is (-1, 1)
-    // and the bottom right is (1, -1). This makes (0, 0) our center.
-    const x = 0;
-    const y = 0;
-
-    // Create a THREE.Raycaster if one doesn't already exist,
-    // and use it to generate an origin and direction from
-    // our camera (device) using the tap coordinates.
-    // Learn more about THREE.Raycaster:
-    // https://threejs.org/docs/#api/core/Raycaster
     this.raycaster = this.raycaster || new THREE.Raycaster();
-    this.raycaster.setFromCamera({ x, y }, this.camera);
+    this.raycaster.setFromCamera({ x: 0, y: 0 }, this.camera);
     const ray = this.raycaster.ray;
 
-    // Fire the hit test to see if our ray collides with a real
-    // surface. Note that we must turn our THREE.Vector3 origin and
-    // direction into an array of x, y, and z values. The proposal
     // for `XRSession.prototype.requestHitTest` can be found here:
     // https://github.com/immersive-web/hit-test
     const origin = new Float32Array(ray.origin.toArray());
@@ -281,40 +269,150 @@ class App {
       this.frameOfRef
     );
 
-    // If we found at least one hit...
     if (hits.length) {
-      // We can have multiple collisions per hit test. Let's just take the
-      // first hit, the nearest, for now.
       const hit = hits[0];
-
-      // Our XRHitResult object has one property, `hitMatrix`, a
-      // Float32Array(16) representing a 4x4 Matrix encoding position where
-      // the ray hit an object, and the orientation has a Y-axis that corresponds
-      // with the normal of the object at that location.
-      // Turn this matrix into a THREE.Matrix4().
       const hitMatrix = new THREE.Matrix4().fromArray(hit.hitMatrix);
 
-      // Now apply the position from the hitMatrix onto our model.
       this.model.position.setFromMatrixPosition(hitMatrix);
+      this.model.visible = true;
+      console.log("show model");
 
-      // Rather than using the rotation encoded by the `modelMatrix`,
-      // rotate the model to face the camera. Use this utility to
-      // rotate the model only on the Y axis.
-      DemoUtils.lookAtOnY(this.model, this.camera);
+      lookAtOnY(this.scene, this.camera);
 
-      // Now that we've found a collision from the hit test, let's use
-      // the Y position of that hit and assume that's the floor. We created
-      // a mesh in `DemoUtils.createLitScene()` that receives shadows, so set
-      // it's Y position to that of the hit matrix so that shadows appear to be
-      // cast on the ground under the model.
       const shadowMesh = this.scene.children.find(c => c.name === "shadowMesh");
       shadowMesh.position.y = this.model.position.y;
 
-      // Ensure our model has been added to the scene.
-      this.model.rotation.x = THREE.Math.degToRad(-90);
       this.scene.add(this.model);
     }
   }
 }
 
 window.app = new App();
+
+class Reticle extends THREE.Object3D {
+  constructor(xrSession, camera) {
+    super();
+
+    this.loader = new THREE.TextureLoader();
+
+    let geometry = new THREE.RingGeometry(0.1, 0.11, 24, 1);
+    let material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+    geometry.applyMatrix(
+      new THREE.Matrix4().makeRotationX(THREE.Math.degToRad(-90))
+    );
+
+    this.ring = new THREE.Mesh(geometry, material);
+
+    geometry = new THREE.PlaneBufferGeometry(0.15, 0.15);
+    geometry.applyMatrix(
+      new THREE.Matrix4().makeRotationX(THREE.Math.degToRad(-90))
+    );
+    geometry.applyMatrix(
+      new THREE.Matrix4().makeRotationY(THREE.Math.degToRad(0))
+    );
+    material = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0
+    });
+    this.icon = new THREE.Mesh(geometry, material);
+
+    this.loader.load("../assets/Anchor.png", texture => {
+      this.icon.material.opacity = 1;
+      this.icon.material.map = texture;
+    });
+
+    this.add(this.ring);
+    this.add(this.icon);
+
+    this.session = xrSession;
+    this.visible = false;
+    this.camera = camera;
+  }
+
+  async update(frameOfRef) {
+    const hits = await this.getHits(frameOfRef);
+
+    if (hits.length) {
+      const hit = hits[0];
+      const hitMatrix = new THREE.Matrix4().fromArray(hit.hitMatrix);
+      this.position.setFromMatrixPosition(hitMatrix);
+
+      lookAtOnY(this, this.camera);
+
+      this.visible = true;
+    }
+  }
+
+  async getHits(frameOfRef) {
+    try {
+      this.raycaster = this.raycaster || new THREE.Raycaster();
+      this.raycaster.setFromCamera({ x: 0, y: 0 }, this.camera);
+
+      const ray = this.raycaster.ray;
+      const origin = new Float32Array(ray.origin.toArray());
+      const direction = new Float32Array(ray.direction.toArray());
+
+      return this.session.requestHitTest(origin, direction, frameOfRef);
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
+function setupScene() {
+  const scene = new THREE.Scene();
+
+  const light = new THREE.AmbientLight(0xffffff, 1);
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.3);
+  directionalLight.position.set(10, 15, 1);
+  directionalLight.lookAt(0, 0, 0);
+
+  directionalLight.castShadow = true;
+
+  const planeGeometry = new THREE.PlaneGeometry(2000, 2000);
+  planeGeometry.rotateX(-Math.PI / 2);
+
+  var axesHelper = new THREE.AxesHelper(5);
+  scene.add(axesHelper);
+
+  const shadowMesh = new THREE.Mesh(
+    planeGeometry,
+    new THREE.ShadowMaterial({
+      color: 0x111111,
+      opacity: 0.2
+    })
+  );
+
+  shadowMesh.name = "shadowMesh";
+  shadowMesh.receiveShadow = true;
+  shadowMesh.position.y = 10000;
+
+  scene.add(shadowMesh);
+  scene.add(light);
+  scene.add(directionalLight);
+
+  return scene;
+}
+
+function lookAtOnY(looker, target) {
+  const targetPos = new THREE.Vector3().setFromMatrixPosition(
+    target.matrixWorld
+  );
+
+  const angle = Math.atan2(
+    targetPos.x - looker.position.x,
+    targetPos.z - looker.position.z
+  );
+  looker.rotation.set(looker.rotation.x, angle, looker.rotation.z);
+}
+
+function fixFramebuffer(app) {
+  THREE.Object3D.prototype.onBeforeRender = () => {
+    app.gl.bindFramebuffer(
+      app.gl.FRAMEBUFFER,
+      app.session.baseLayer.framebuffer
+    );
+  };
+}
