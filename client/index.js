@@ -49,11 +49,13 @@ class App {
   setupRenderer(xr) {
     const options = xr
       ? {
+          antialias: true,
           alpha: true,
           preserveDrawingBuffer: true,
           autoClear: false
         }
       : {
+          antialias: true,
           alpha: true
         };
 
@@ -69,6 +71,7 @@ class App {
     const composer = new THREE.EffectComposer(renderer);
 
     const renderPass = new THREE.RenderPass(scene, camera);
+    // renderPass.renderToScreen = true;
     composer.addPass(renderPass);
 
     const ssaoPass = new THREE.SSAOPass(scene, camera, false, true);
@@ -78,7 +81,7 @@ class App {
     // ssaoPass.onlyAO = true;
     ssaoPass.radius = 64;
     ssaoPass.aoClamp = 1;
-    ssaoPass.lumInfluence = 1;
+    ssaoPass.lumInfluence = 0.5;
 
     const saoPass = new THREE.SAOPass(scene, camera, false, true);
     saoPass.renderToScreen = true;
@@ -87,7 +90,7 @@ class App {
     saoPass.params = {
       output: THREE.SAOPass.OUTPUT.Default,
       saoBias: 1,
-      saoIntensity: 0.00015,
+      saoIntensity: 0.00025,
       saoScale: 1,
       saoKernelRadius: 32,
       saoMinResolution: 0,
@@ -140,7 +143,6 @@ class App {
     this.composer = this.setupComposer(this.renderer, this.scene, this.camera);
 
     this.camera.position.set(-1, 1, 1);
-    console.log(this.camera.rotation);
 
     const controls = new THREE.OrbitControls(this.camera);
     controls.target.set(0, 0, 0);
@@ -180,7 +182,7 @@ class App {
       this.scene.add(model);
     });
 
-    this.composer = this.setupComposer(this.renderer, this.scene, this.camera);
+    // this.composer = this.setupComposer(this.renderer, this.scene, this.camera);
 
     this.gl = this.renderer.getContext();
 
@@ -277,8 +279,6 @@ class App {
       this.model.visible = true;
       console.log("show model");
 
-      lookAtOnY(this.scene, this.camera);
-
       const shadowMesh = this.scene.children.find(c => c.name === "shadowMesh");
       shadowMesh.position.y = this.model.position.y;
 
@@ -354,7 +354,12 @@ class Reticle extends THREE.Object3D {
       const origin = new Float32Array(ray.origin.toArray());
       const direction = new Float32Array(ray.direction.toArray());
 
-      return this.session.requestHitTest(origin, direction, frameOfRef);
+      const hits = await this.session.requestHitTest(
+        origin,
+        direction,
+        frameOfRef
+      );
+      return hits;
     } catch (e) {
       return [];
     }
@@ -364,8 +369,8 @@ class Reticle extends THREE.Object3D {
 function setupScene() {
   const scene = new THREE.Scene();
 
-  const light = new THREE.AmbientLight(0xffffff, 1);
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.3);
+  const light = new THREE.AmbientLight(0xffffff, 0.75);
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.75);
   directionalLight.position.set(10, 15, 1);
   directionalLight.lookAt(0, 0, 0);
 
@@ -374,13 +379,10 @@ function setupScene() {
   const planeGeometry = new THREE.PlaneGeometry(2000, 2000);
   planeGeometry.rotateX(-Math.PI / 2);
 
-  var axesHelper = new THREE.AxesHelper(5);
-  scene.add(axesHelper);
-
   const shadowMesh = new THREE.Mesh(
     planeGeometry,
     new THREE.ShadowMaterial({
-      color: 0x111111,
+      color: 0x000000,
       opacity: 0.2
     })
   );
@@ -405,7 +407,8 @@ function lookAtOnY(looker, target) {
     targetPos.x - looker.position.x,
     targetPos.z - looker.position.z
   );
-  looker.rotation.set(looker.rotation.x, angle, looker.rotation.z);
+
+  looker.rotation.set(0, angle, 0);
 }
 
 function fixFramebuffer(app) {
